@@ -34,7 +34,15 @@ class Simulation:
     def __init__(self, config: SimConfig | None = None) -> None:
         self.cfg = config or SimConfig()
         cfg = self.cfg
+        # Arrivals and each lane's driver attributes use separate streams, so two
+        # runs with the same seed get identical demand (common random numbers)
+        # however differently traffic evolves.
         self.rng = np.random.default_rng(cfg.seed)
+        self._lane_rngs = [
+            np.random.default_rng([cfg.seed, lane + 1]) for lane in range(cfg.num_lanes)
+        ]
+        self._next_entrant: list[tuple | None] = [None] * cfg.num_lanes
+        self._queue_log: list[tuple[float, int]] = []
         self.road = Road(cfg.road_length, cfg.num_lanes, cfg.speed_limit)
         self.t = 0.0
         self.step_count = 0
@@ -176,9 +184,33 @@ class Simulation:
 
         Returns the biased incentive if the change is safe and worthwhile,
         otherwise ``None``. Uses each vehicle's stored current ``a``.
+        Lorries never decide lane changes themselves.
         """
+        if veh.is_lorry:
+            return None
+        result = self._lane_change_effect(veh, target)
+        if result is None or not result[0]:
+            return None
+        return result[1] if result[1] > self.cfg.lane_change_threshold else None
+
+    def force_lane_change(self, veh: Vehicle, target: int) -> bool:
+        """Move ``veh`` to ``target`` if MOBIL's safety criterion allows, ignoring incentive.
+
+        Used for scripted manoeuvres such as a lorry overtake. Returns whether
+        the change happened.
+        """
+        self.update_accelerations()
+        result = self._lane_change_effect(veh, target)
+        if result is None or not result[0]:
+            return False
+        self.road.change_lane(veh, target)
+        veh.last_lane_change = self.t
+        return True
+
+    def _lane_change_effect(self, veh: Vehicle, target: int) -> tuple[bool, float] | None:
+        """``(safe, biased_incentive)`` of moving ``veh`` to ``target``; ``None`` if impossible."""
         cfg = self.cfg
-        if veh.is_lorry or not 0 <= target < self.road.num_lanes or target == veh.lane:
+        if not 0 <= target < self.road.num_lanes or target == veh.lane:
             return None
         new_leader, new_follower = self.road.neighbours(veh.x, target)
         if new_leader is not None and new_leader.rear - veh.x <= 0:
@@ -204,8 +236,7 @@ class Simulation:
         # A crawling follower cannot be endangered (its IDM output near standstill
         # is dominated by the s0 term); ignoring it lets zipper merges complete.
         crawling = new_follower is not None and new_follower.v < CREEP_SPEED
-        if not mobil_is_safe(0.0 if crawling else a_nf_new, a_self_new, cfg.b_safe):
-            return None
+        safe = mobil_is_safe(0.0 if crawling else a_nf_new, a_self_new, cfg.b_safe)
         gain = mobil_incentive(
             veh.a, a_self_new, a_nf_old, a_nf_new, a_of_old, a_of_new, veh.profile.politeness
         )
@@ -213,7 +244,7 @@ class Simulation:
         gain += cfg.obstruction_bias * (
             self._blocked(veh.x, veh.lane) - self._blocked(veh.x, target)
         )
-        return gain if gain > cfg.lane_change_threshold else None
+        return safe, gain
 
     def _lane_changes(self) -> None:
         self._yields = []
@@ -277,14 +308,19 @@ class Simulation:
             if self.pending[lane] and self._try_insert(lane):
                 self.pending[lane] -= 1
 
+    def _entrant(self, lane: int) -> tuple:
+        """The next vehicle waiting in ``lane`` as ``(profile, is_lorry)``; drawn once."""
+        if self._next_entrant[lane] is None:
+            cfg, rng = self.cfg, self._lane_rngs[lane]
+            if lane == 0 and rng.random() < cfg.lorry_fraction:
+                self._next_entrant[lane] = (LORRY_PROFILE, True)
+            else:
+                kind = self._kinds[rng.choice(len(self._kinds), p=self._weights)]
+                self._next_entrant[lane] = (make_profile(kind, cfg.speed_limit, rng), False)
+        return self._next_entrant[lane]
+
     def _try_insert(self, lane: int) -> bool:
-        cfg = self.cfg
-        is_lorry = lane == 0 and self.rng.random() < cfg.lorry_fraction
-        if is_lorry:
-            profile = LORRY_PROFILE
-        else:
-            kind = self._kinds[self.rng.choice(len(self._kinds), p=self._weights)]
-            profile = make_profile(kind, cfg.speed_limit, self.rng)
+        profile, is_lorry = self._entrant(lane)
         v = profile.v0
         vehs = self.road.lanes[lane]
         if vehs:
@@ -295,11 +331,13 @@ class Simulation:
                 return False
         length = LORRY_LENGTH if is_lorry else CAR_LENGTH
         self.road.insert(self._new_vehicle(lane, 0.0, max(v, 0.0), length, profile, is_lorry))
+        self._next_entrant[lane] = None
         self.inserted += 1
         return True
 
     def _record(self) -> None:
         t = round(self.t, 6)
+        self._queue_log.append((t, sum(self.pending)))
         self._records.extend(
             (t, q.id, q.lane, q.x, q.v, q.a, q.is_lorry) for q in self.road.vehicles
         )
@@ -328,3 +366,7 @@ class Simulation:
     def history(self) -> pd.DataFrame:
         """Recorded trajectories (downsampled to ``record_interval``)."""
         return pd.DataFrame(self._records, columns=RECORD_COLUMNS)
+
+    def entry_queue(self) -> pd.DataFrame:
+        """Vehicles waiting to enter (all lanes) at each record time: columns ``t, queued``."""
+        return pd.DataFrame(self._queue_log, columns=["t", "queued"])

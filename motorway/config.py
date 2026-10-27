@@ -54,7 +54,7 @@ def make_profile(
     if kind not in DRIVER_TYPES:
         raise ValueError(f"unknown driver type {kind!r}; choose from {list(DRIVER_TYPES)}")
     spec = DRIVER_TYPES[kind]
-    noise = max(0.5, 1.0 + speed_spread * rng.standard_normal())
+    noise = max(0.5, 1.0 + speed_spread * rng.standard_normal()) if speed_spread else 1.0
     return DriverProfile(
         v0=spec["speed_factor"] * speed_limit * noise,
         a=spec["a"],

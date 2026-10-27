@@ -34,28 +34,75 @@ def speed_colour(v: float, v_max: float) -> tuple[int, int, int]:
     return (255, int(510 * f), 0) if f < 0.5 else (int(510 * (1 - f)), 220, 0)
 
 
+def draw_road(
+    surface,
+    sim: Simulation,
+    font,
+    x_start: float = 0.0,
+    x_end: float | None = None,
+    rows: int = ROWS,
+    lane_px: int = LANE_PX,
+    top: int = 60,
+) -> None:
+    """Draw road section [x_start, x_end) wrapped onto ``rows`` rows of ``surface``.
+
+    Cars are coloured by speed; lorries are blue with a white bounding box and,
+    when moving, a shaded slipstream zone behind them.
+    """
+    import pygame
+
+    cfg = sim.cfg
+    x_end = cfg.road_length if x_end is None else x_end
+    width, height = surface.get_size()
+    seg_len = (x_end - x_start) / rows
+    scale = (width - 2 * MARGIN) / seg_len
+    row_h = cfg.num_lanes * lane_px
+    row_gap = (height - top - rows * row_h) / rows
+    v_max = cfg.speed_limit * 1.1
+
+    surface.fill((25, 25, 30))
+    for row in range(rows):
+        y0 = top + row * (row_h + row_gap)
+        pygame.draw.rect(surface, (60, 60, 66), (MARGIN, y0, width - 2 * MARGIN, row_h))
+        for lane in range(1, cfg.num_lanes):
+            y = y0 + lane * lane_px
+            pygame.draw.line(surface, (120, 120, 120), (MARGIN, y), (width - MARGIN, y))
+        label = font.render(f"{(x_start + row * seg_len) / 1000:.2f} km", True, (150, 150, 150))
+        surface.blit(label, (MARGIN, y0 - 18))
+
+    surface.set_clip(pygame.Rect(MARGIN, 0, width - 2 * MARGIN, height))
+    for q in sim.road.vehicles:
+        if not x_start <= q.x < x_end:
+            continue
+        row = int((q.x - x_start) // seg_len)
+        sx = MARGIN + (q.x - x_start - row * seg_len) * scale
+        sy = top + row * (row_h + row_gap) + (cfg.num_lanes - 1 - q.lane) * lane_px
+        w = max(2.0, q.length * scale)
+        rect = pygame.Rect(sx - w, sy + 2, w, lane_px - 3)
+        if q.is_lorry:
+            if q.v > 0:  # parked lorry has no slipstream
+                wake_w = cfg.wake_length * scale
+                pygame.draw.rect(
+                    surface, (40, 70, 120), (sx - w - wake_w, sy + 1, wake_w, lane_px - 1)
+                )
+            pygame.draw.rect(surface, (90, 90, 230), rect)
+            pygame.draw.rect(surface, (255, 255, 255), rect.inflate(4, 4), 1)
+        else:
+            pygame.draw.rect(surface, speed_colour(q.v, v_max), rect)
+    surface.set_clip(None)
+
+
 def render(sim: Simulation) -> None:
     """Real-time Pygame view. Space pauses, Esc/close quits."""
     import pygame
 
-    cfg = sim.cfg
     pygame.init()
     screen = pygame.display.set_mode((WIDTH, HEIGHT))
     pygame.display.set_caption("motorway-flow-sim")
     font = pygame.font.Font(None, 20)  # built-in font; SysFont scans system fonts (slow)
     clock = pygame.time.Clock()
-    seg_len = cfg.road_length / ROWS
-    scale = (WIDTH - 2 * MARGIN) / seg_len
-    row_h = cfg.num_lanes * LANE_PX
-    row_gap = (HEIGHT - 60 - ROWS * row_h) / ROWS
-    v_max = cfg.speed_limit * 1.1
-    steps_total = round(cfg.duration / cfg.dt)
+    steps_total = round(sim.cfg.duration / sim.cfg.dt)
     paused = False
-
-    def to_screen(x: float, lane: int) -> tuple[float, float, int]:
-        row = min(int(x // seg_len), ROWS - 1)
-        top = 60 + row * (row_h + row_gap) + (cfg.num_lanes - 1 - lane) * LANE_PX
-        return MARGIN + (x - row * seg_len) * scale, top, row
 
     while sim.step_count < steps_total:
         for event in pygame.event.get():
@@ -70,35 +117,8 @@ def render(sim: Simulation) -> None:
             for _ in range(STEPS_PER_FRAME):
                 sim.step()
 
-        screen.fill((25, 25, 30))
-        for row in range(ROWS):
-            top = 60 + row * (row_h + row_gap)
-            pygame.draw.rect(screen, (60, 60, 66), (MARGIN, top, WIDTH - 2 * MARGIN, row_h))
-            for lane in range(1, cfg.num_lanes):
-                y = top + lane * LANE_PX
-                pygame.draw.line(screen, (120, 120, 120), (MARGIN, y), (WIDTH - MARGIN, y))
-            label = font.render(f"{row * seg_len / 1000:.2f} km", True, (150, 150, 150))
-            screen.blit(label, (MARGIN, top - 18))
-
+        draw_road(screen, sim, font)
         vehicles = sim.road.vehicles
-        for q in vehicles:
-            sx, sy, _ = to_screen(q.x, q.lane)
-            w = max(2.0, q.length * scale)
-            rect = pygame.Rect(sx - w, sy + 2, w, LANE_PX - 3)
-            if q.is_lorry:
-                if q.v > 0:  # parked lorry has no slipstream
-                    wake = pygame.Rect(
-                        sx - w - cfg.wake_length * scale,
-                        sy + 1,
-                        cfg.wake_length * scale,
-                        LANE_PX - 1,
-                    )
-                    pygame.draw.rect(screen, (40, 70, 120), wake)
-                pygame.draw.rect(screen, (90, 90, 230), rect)
-                pygame.draw.rect(screen, (255, 255, 255), rect.inflate(4, 4), 1)
-            else:
-                pygame.draw.rect(screen, speed_colour(q.v, v_max), rect)
-
         mean_v = sum(q.v for q in vehicles) / len(vehicles) * 3.6 if vehicles else 0.0
         hud = (
             f"t={sim.t:6.1f}s  vehicles={len(vehicles):4d}  mean={mean_v:5.1f} km/h  "
