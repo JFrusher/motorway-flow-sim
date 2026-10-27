@@ -1,0 +1,7 @@
+# Moving bottleneck: slow lorry (12 m/s, ~27 mph) in lane 1 with active slipstream.
+# Cars draft in its wake and build a platoon that must overtake into dense lanes.
+duration: 360
+inflow: 5400
+lorry_fraction: 0.05
+bottleneck_lorry_x: 400
+bottleneck_lorry_speed: 12

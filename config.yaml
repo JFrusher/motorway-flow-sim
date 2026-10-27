@@ -1,0 +1,22 @@
+# Default scenario: broken-down lorry in lane 1 at 3 km.
+# Produces a zipper-merge bottleneck with a shockwave propagating upstream.
+dt: 0.1
+duration: 480
+record_interval: 0.5
+seed: 42
+
+road_length: 5000
+num_lanes: 3
+speed_limit: 31.3
+
+inflow: 4800
+profile_mix: {aggressive: 0.2, normal: 0.6, cautious: 0.2}
+lorry_fraction: 0.0
+
+bottleneck_lorry_x: 3000
+bottleneck_lorry_speed: 0
+bottleneck_lorry_lane: 0
+
+wake_length: 40
+wake_accel_gain: 0.15
+wake_headway_factor: 0.8
